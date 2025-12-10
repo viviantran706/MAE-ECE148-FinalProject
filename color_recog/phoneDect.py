@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import cv2
-import depthai as dai
 import numpy as np
 
 # -------------------------------
@@ -115,7 +114,7 @@ def detect_windows_from_firemask(red_mask: np.ndarray, orange_mask: np.ndarray):
     if not rects:
         return []
 
-    # Sort *roughly* row-major first: by y-center, then x-center
+    # Sort *roughly* row-major first
     rects = sorted(rects, key=lambda r: (r[1] + r[3] / 2.0,
                                          r[0] + r[2] / 2.0))
     return rects
@@ -125,14 +124,14 @@ def group_rects_into_grid(rects):
     """
     Given a list of rects (x,y,w,h) sorted by y then x,
     group them into rows based on vertical proximity, and
-    sort each row by x-center.
+    sort each row by x-center. Returns:
 
-    Returns:
       rows: list of lists of rects, e.g. [[r00,r01,...], [r10,r11,...], ...]
     """
     if not rects:
         return []
 
+    # Compute centers & heights
     centers_y = [y + h / 2.0 for (_, y, _, h) in rects]
     heights   = [h for (_, _, _, h) in rects]
     median_h  = np.median(heights)
@@ -148,11 +147,14 @@ def group_rects_into_grid(rects):
         if abs(cy - current_y) <= row_thresh:
             current_row.append(r)
         else:
+            # finish old row, start new
+            # sort row by x-center
             current_row.sort(key=lambda rr: rr[0] + rr[2] / 2.0)
             rows.append(current_row)
             current_row = [r]
             current_y = cy
 
+    # add last row
     current_row.sort(key=lambda rr: rr[0] + rr[2] / 2.0)
     rows.append(current_row)
 
@@ -176,7 +178,7 @@ def process_frame(frame_bgr: np.ndarray):
     annotated = frame_bgr.copy()
 
     rects = detect_windows_from_firemask(red_mask, orange_mask)
-    rows = group_rects_into_grid(rects)
+    rows = group_rects_into_grid(rects)  # list of rows, each row is list of rects
 
     # Flatten rows into row-major window list
     windows = [r for row in rows for r in row]
@@ -239,47 +241,46 @@ def process_frame(frame_bgr: np.ndarray):
     return annotated, temps, persons, windows, temp_matrix, person_matrix
 
 
-# ---------- main loop using OAK Lite (DepthAI v3) ----------
+# ---------- main loop ----------
 
 def main():
-    # Build DepthAI v3 pipeline
-    with dai.Pipeline() as pipeline:
-        # Camera node (unified Camera in v3)
-        cam = pipeline.create(dai.node.Camera).build()
+    cap_index = 0  # change to 1 or 2 if needed
+    cap = cv2.VideoCapture(cap_index)
 
-        # Request a 640x480 BGR output stream and create its queue
-        video_queue = cam.requestOutput((640, 480)).createOutputQueue()
+    if not cap.isOpened():
+        print(f"[ERROR] Could not open webcam on index {cap_index}. Try 1 or 2.")
+        return
 
-        # Start pipeline on the device
-        pipeline.start()
-        print("Press 'q' to quit.")
+    print("[INFO] Webcam mode. Press 'q' to quit.")
 
-        # Main loop
-        while pipeline.isRunning():
-            img_msg = video_queue.get()      # dai.ImgFrame
-            frame = img_msg.getCvFrame()     # np.ndarray (BGR)
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("[WARN] Failed to grab frame.")
+            break
 
-            annotated_frame, temps, persons, windows, temp_matrix, person_matrix = process_frame(frame)
+        annotated, temps, persons, windows, temp_matrix, person_matrix = process_frame(frame)
 
-            n = len(windows)
+        n = len(windows)
 
-            # Per-window table
-            print("Window index -> (Temp, Person):")
-            for i in range(n):
-                print(f"  Window {i+1}: ({temps[i]:.1f} C, {bool(persons[i])})")
+        # ---- Table: window i -> (temp, person) ----
+        print("Window index -> (Temp, Person):")
+        for i in range(n):
+            print(f"  Window {i+1}: ({temps[i]:.1f} C, {bool(persons[i])})")
 
-            # Adaptive matrices
-            print("Temperature matrix (C):")
-            print(np.array_str(temp_matrix, precision=1))
-            print("Person matrix (1=True):")
-            print(person_matrix)
-            print("-" * 40)
+        # ---- Adaptive matrix output ----
+        print("Temperature matrix (C):")
+        print(np.array_str(temp_matrix, precision=1))
+        print("Person matrix (1=True):")
+        print(person_matrix)
+        print("-" * 40)
 
-            cv2.imshow("Heat Detection (OAK)", annotated_frame)
+        cv2.imshow("Per-window Fire Detection", annotated)
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
+    cap.release()
     cv2.destroyAllWindows()
 
 
